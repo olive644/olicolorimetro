@@ -40,7 +40,7 @@
     border-radius: 8px; border: 2px solid #444; vertical-align: middle;
   }
   .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
-  input[type=number] {
+  input[type=number], input[type=text] {
     background: #0f1115; border: 1px solid #333; color: #e8e8e8;
     border-radius: 6px; padding: 6px 8px; width: 90px;
   }
@@ -52,12 +52,23 @@
   }
   .small { font-size: 0.8rem; color: #999; }
   a.del { color: #f87171; cursor: pointer; font-size: 0.8rem; }
+  #statusText { font-size: 0.8rem; }
+  #statusText.error { color: #f87171; }
+  #statusText.ok { color: #4ade80; }
 </style>
 </head>
 <body>
 
-<h1>🧪 Colorímetro</h1>
-<p class="sub">Protótipo — leitura de cor pela câmera e curva de calibração</p>
+<h1>Colorímetro</h1>
+<p class="sub">Leitura de cor pela câmera e curva de calibração</p>
+
+<div class="card">
+  <div class="row">
+    <label class="small" for="apiUrlInput">Endereço da API</label>
+  </div>
+  <input type="text" id="apiUrlInput" style="width:100%" placeholder="https://seu-backend.exemplo.com">
+  <div id="statusText" class="small">desconectado</div>
+</div>
 
 <div class="card">
   <div class="video-wrap">
@@ -75,8 +86,8 @@
   <div class="row">
     <span class="swatch" id="swatch" style="background:#333"></span>
     <div>
-      <div id="rgbText" class="small">RGB: —</div>
-      <div id="labText" class="small">Absorbância (canal): —</div>
+      <div id="rgbText" class="small">RGB: sem leitura</div>
+      <div id="labText" class="small">Absorbância (canal): sem leitura</div>
     </div>
   </div>
 </div>
@@ -97,8 +108,8 @@
 
 <div class="card">
   <h3 style="margin-top:0">Resultado</h3>
-  <div class="result" id="resultText">—</div>
-  <p class="small">Estimado a partir da curva de calibração e da leitura atual da câmera.</p>
+  <div class="result" id="resultText">sem leitura</div>
+  <p class="small">Estimado pelo backend a partir da curva de calibração salva.</p>
 </div>
 
 <script>
@@ -114,10 +125,26 @@ const addPointBtn = document.getElementById('addPointBtn');
 const pointsTableBody = document.querySelector('#pointsTable tbody');
 const fitInfo = document.getElementById('fitInfo');
 const resultText = document.getElementById('resultText');
+const apiUrlInput = document.getElementById('apiUrlInput');
+const statusText = document.getElementById('statusText');
 
-let currentReading = null; // {r,g,b,channel}
-let points = JSON.parse(localStorage.getItem('calib_points') || '[]');
-let fit = null; // {m, b}
+let lastBlob = null;
+let lastRoi = null;
+
+function apiBase() {
+  return apiUrlInput.value.trim().replace(/\/$/, '');
+}
+
+apiUrlInput.value = localStorage.getItem('api_base_url') || '';
+apiUrlInput.addEventListener('change', () => {
+  localStorage.setItem('api_base_url', apiUrlInput.value.trim());
+  refreshCalibration();
+});
+
+function setStatus(text, kind) {
+  statusText.textContent = text;
+  statusText.className = kind || '';
+}
 
 async function startCamera() {
   try {
@@ -134,7 +161,6 @@ async function startCamera() {
 }
 startBtn.addEventListener('click', startCamera);
 
-// Drag do ROI
 let dragging = false, offsetX = 0, offsetY = 0;
 roiBox.addEventListener('pointerdown', (e) => {
   dragging = true;
@@ -155,6 +181,17 @@ roiBox.addEventListener('pointermove', (e) => {
 });
 roiBox.addEventListener('pointerup', () => dragging = false);
 
+function currentRoiFractions() {
+  const wrapRect = roiBox.parentElement.getBoundingClientRect();
+  const roiRect = roiBox.getBoundingClientRect();
+  return {
+    x: (roiRect.left - wrapRect.left) / wrapRect.width,
+    y: (roiRect.top - wrapRect.top) / wrapRect.height,
+    w: roiRect.width / wrapRect.width,
+    h: roiRect.height / wrapRect.height,
+  };
+}
+
 function captureFrame() {
   const canvas = document.createElement('canvas');
   canvas.width = video.videoWidth;
@@ -162,108 +199,111 @@ function captureFrame() {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(video, 0, 0);
 
-  const wrapRect = roiBox.parentElement.getBoundingClientRect();
-  const roiRect = roiBox.getBoundingClientRect();
-  const scaleX = canvas.width / wrapRect.width;
-  const scaleY = canvas.height / wrapRect.height;
+  lastRoi = currentRoiFractions();
 
-  const sx = (roiRect.left - wrapRect.left) * scaleX;
-  const sy = (roiRect.top - wrapRect.top) * scaleY;
-  const sw = roiRect.width * scaleX;
-  const sh = roiRect.height * scaleY;
-
-  const imgData = ctx.getImageData(sx, sy, sw, sh);
-  let r = 0, g = 0, b = 0, n = 0;
-  for (let i = 0; i < imgData.data.length; i += 4) {
-    r += imgData.data[i];
-    g += imgData.data[i+1];
-    b += imgData.data[i+2];
-    n++;
-  }
-  r = Math.round(r / n);
-  g = Math.round(g / n);
-  b = Math.round(b / n);
-
-  // Canal usado para a curva: aqui usamos absorbância aproximada no canal G
-  // (ajuste para R ou B conforme a cor da sua reação/amostra)
-  const channel = -Math.log10(Math.max(g, 1) / 255);
-
-  currentReading = { r, g, b, channel };
-  swatch.style.background = `rgb(${r},${g},${b})`;
-  rgbText.textContent = `RGB: ${r}, ${g}, ${b}`;
-  labText.textContent = `Absorbância (canal G): ${channel.toFixed(4)}`;
-  updateResult();
+  canvas.toBlob(async (blob) => {
+    lastBlob = blob;
+    await sendReading(blob, lastRoi);
+  }, 'image/jpeg', 0.92);
 }
 captureBtn.addEventListener('click', captureFrame);
 
-function renderPoints() {
+async function sendReading(blob, roi) {
+  if (!apiBase()) {
+    setStatus('informe o endereço da API acima', 'error');
+    return;
+  }
+  const form = new FormData();
+  form.append('image', blob, 'frame.jpg');
+  form.append('roi_x', roi.x);
+  form.append('roi_y', roi.y);
+  form.append('roi_w', roi.w);
+  form.append('roi_h', roi.h);
+
+  try {
+    setStatus('enviando leitura...', '');
+    const res = await fetch(`${apiBase()}/api/readings`, { method: 'POST', body: form });
+    if (!res.ok) throw new Error(`Erro ${res.status}`);
+    const data = await res.json();
+    swatch.style.background = `rgb(${Math.round(data.r)},${Math.round(data.g)},${Math.round(data.b)})`;
+    rgbText.textContent = `RGB: ${Math.round(data.r)}, ${Math.round(data.g)}, ${Math.round(data.b)}`;
+    labText.textContent = `Absorbância (canal G): ${data.channel_value.toFixed(4)}`;
+    resultText.textContent = data.estimated_concentration != null
+      ? data.estimated_concentration.toFixed(3)
+      : 'sem calibração suficiente';
+    setStatus('conectado', 'ok');
+  } catch (err) {
+    setStatus('falha ao conectar na API: ' + err.message, 'error');
+  }
+}
+
+async function addCalibrationPoint() {
+  if (!lastBlob || !lastRoi) { alert('Capture uma leitura primeiro.'); return; }
+  const conc = parseFloat(concInput.value);
+  if (isNaN(conc)) { alert('Informe a concentração do padrão.'); return; }
+  if (!apiBase()) { setStatus('informe o endereço da API acima', 'error'); return; }
+
+  const form = new FormData();
+  form.append('image', lastBlob, 'frame.jpg');
+  form.append('roi_x', lastRoi.x);
+  form.append('roi_y', lastRoi.y);
+  form.append('roi_w', lastRoi.w);
+  form.append('roi_h', lastRoi.h);
+  form.append('concentration', conc);
+
+  try {
+    setStatus('salvando ponto de calibração...', '');
+    const res = await fetch(`${apiBase()}/api/calibration-points`, { method: 'POST', body: form });
+    if (!res.ok) throw new Error(`Erro ${res.status}`);
+    concInput.value = '';
+    await refreshCalibration();
+    setStatus('ponto salvo', 'ok');
+  } catch (err) {
+    setStatus('falha ao salvar ponto: ' + err.message, 'error');
+  }
+}
+addPointBtn.addEventListener('click', addCalibrationPoint);
+
+async function refreshCalibration() {
+  if (!apiBase()) return;
+  try {
+    const [pointsRes, fitRes] = await Promise.all([
+      fetch(`${apiBase()}/api/calibration-points`),
+      fetch(`${apiBase()}/api/fit`),
+    ]);
+    const points = await pointsRes.json();
+    const fit = await fitRes.json();
+    renderPoints(points);
+    renderFit(fit);
+  } catch (err) {
+    setStatus('falha ao carregar calibração: ' + err.message, 'error');
+  }
+}
+
+function renderPoints(points) {
   pointsTableBody.innerHTML = '';
-  points.forEach((p, i) => {
+  points.forEach((p) => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${p.conc}</td><td>${p.channel.toFixed(4)}</td><td><a class="del" data-i="${i}">remover</a></td>`;
+    tr.innerHTML = `<td>${p.concentration}</td><td>${p.channel_value.toFixed(4)}</td><td><a class="del" data-id="${p.id}">remover</a></td>`;
     pointsTableBody.appendChild(tr);
   });
-  document.querySelectorAll('.del').forEach(el => {
-    el.addEventListener('click', () => {
-      points.splice(+el.dataset.i, 1);
-      savePoints();
-      renderPoints();
-      computeFit();
+  document.querySelectorAll('.del').forEach((el) => {
+    el.addEventListener('click', async () => {
+      await fetch(`${apiBase()}/api/calibration-points/${el.dataset.id}`, { method: 'DELETE' });
+      refreshCalibration();
     });
   });
 }
 
-function savePoints() {
-  localStorage.setItem('calib_points', JSON.stringify(points));
-}
-
-addPointBtn.addEventListener('click', () => {
-  if (!currentReading) { alert('Capture uma leitura primeiro.'); return; }
-  const conc = parseFloat(concInput.value);
-  if (isNaN(conc)) { alert('Informe a concentração do padrão.'); return; }
-  points.push({ conc, channel: currentReading.channel });
-  savePoints();
-  renderPoints();
-  computeFit();
-  concInput.value = '';
-});
-
-function computeFit() {
-  if (points.length < 2) {
-    fit = null;
-    fitInfo.textContent = 'Adicione ao menos 2 pontos para gerar a curva.';
-    updateResult();
+function renderFit(fit) {
+  if (fit.m == null) {
+    fitInfo.textContent = `Pontos salvos: ${fit.points_used}. Adicione ao menos 2 para gerar a curva.`;
     return;
   }
-  // Regressão linear simples: channel = m*conc + b
-  const n = points.length;
-  const sumX = points.reduce((s,p) => s + p.conc, 0);
-  const sumY = points.reduce((s,p) => s + p.channel, 0);
-  const sumXY = points.reduce((s,p) => s + p.conc*p.channel, 0);
-  const sumXX = points.reduce((s,p) => s + p.conc*p.conc, 0);
-  const denom = (n*sumXX - sumX*sumX);
-  if (denom === 0) {
-    fit = null;
-    fitInfo.textContent = 'Pontos insuficientes (concentrações repetidas).';
-    updateResult();
-    return;
-  }
-  const m = (n*sumXY - sumX*sumY) / denom;
-  const b = (sumY - m*sumX) / n;
-  fit = { m, b };
-  fitInfo.textContent = `Curva: canal = ${m.toFixed(5)} × conc + ${b.toFixed(5)}`;
-  updateResult();
+  fitInfo.textContent = `Curva: canal = ${fit.m.toFixed(5)} x conc + ${fit.b.toFixed(5)} (${fit.points_used} pontos)`;
 }
 
-function updateResult() {
-  if (!currentReading) { resultText.textContent = '—'; return; }
-  if (!fit) { resultText.textContent = 'Sem calibração'; return; }
-  const conc = (currentReading.channel - fit.b) / fit.m;
-  resultText.textContent = conc.toFixed(3);
-}
-
-renderPoints();
-computeFit();
+refreshCalibration();
 </script>
 
 </body>
