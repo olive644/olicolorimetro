@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Colorímetro</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    margin: 0; padding: 16px;
+    background: #0f1115; color: #e8e8e8;
+    max-width: 480px; margin-inline: auto;
+  }
+  h1 { font-size: 1.3rem; margin-bottom: 4px; }
+  p.sub { color: #999; font-size: 0.85rem; margin-top: 0; }
+  .card {
+    background: #1a1d24; border-radius: 12px; padding: 14px;
+    margin-bottom: 14px; border: 1px solid #2a2e38;
+  }
+  video, canvas.preview {
+    width: 100%; border-radius: 8px; background: #000;
+    display: block;
+  }
+  .video-wrap { position: relative; }
+  #roiBox {
+    position: absolute; border: 2px solid #4ade80;
+    top: 40%; left: 40%; width: 20%; height: 20%;
+    box-sizing: border-box; cursor: move;
+  }
+  button {
+    background: #4ade80; color: #0f1115; border: none;
+    padding: 10px 16px; border-radius: 8px; font-weight: 600;
+    font-size: 0.95rem; cursor: pointer; margin-right: 8px; margin-top: 8px;
+  }
+  button.secondary { background: #2a2e38; color: #e8e8e8; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .swatch {
+    display: inline-block; width: 40px; height: 40px;
+    border-radius: 8px; border: 2px solid #444; vertical-align: middle;
+  }
+  .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+  input[type=number] {
+    background: #0f1115; border: 1px solid #333; color: #e8e8e8;
+    border-radius: 6px; padding: 6px 8px; width: 90px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  td, th { padding: 6px 4px; border-bottom: 1px solid #2a2e38; text-align: left; }
+  .result {
+    font-size: 1.4rem; font-weight: 700; color: #4ade80;
+    text-align: center; padding: 10px 0;
+  }
+  .small { font-size: 0.8rem; color: #999; }
+  a.del { color: #f87171; cursor: pointer; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+
+<h1>🧪 Colorímetro</h1>
+<p class="sub">Protótipo — leitura de cor pela câmera e curva de calibração</p>
+
+<div class="card">
+  <div class="video-wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="roiBox"></div>
+  </div>
+  <div class="row">
+    <button id="startBtn">Ligar câmera</button>
+    <button id="captureBtn" disabled>Capturar</button>
+  </div>
+  <p class="small">Arraste o quadrado verde sobre a amostra (ou o líquido no tubo/cubeta) antes de capturar.</p>
+</div>
+
+<div class="card">
+  <div class="row">
+    <span class="swatch" id="swatch" style="background:#333"></span>
+    <div>
+      <div id="rgbText" class="small">RGB: —</div>
+      <div id="labText" class="small">Absorbância (canal): —</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Calibração</h3>
+  <p class="small">Adicione pontos conhecidos (concentração real x leitura de cor) para gerar a curva.</p>
+  <div class="row">
+    <input type="number" id="concInput" placeholder="Concentração" step="any">
+    <button id="addPointBtn" class="secondary">Usar leitura atual como ponto</button>
+  </div>
+  <table id="pointsTable">
+    <thead><tr><th>Conc.</th><th>Canal</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="small" id="fitInfo" style="margin-top:8px;"></div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Resultado</h3>
+  <div class="result" id="resultText">—</div>
+  <p class="small">Estimado a partir da curva de calibração e da leitura atual da câmera.</p>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const startBtn = document.getElementById('startBtn');
+const captureBtn = document.getElementById('captureBtn');
+const roiBox = document.getElementById('roiBox');
+const swatch = document.getElementById('swatch');
+const rgbText = document.getElementById('rgbText');
+const labText = document.getElementById('labText');
+const concInput = document.getElementById('concInput');
+const addPointBtn = document.getElementById('addPointBtn');
+const pointsTableBody = document.querySelector('#pointsTable tbody');
+const fitInfo = document.getElementById('fitInfo');
+const resultText = document.getElementById('resultText');
+
+let currentReading = null; // {r,g,b,channel}
+let points = JSON.parse(localStorage.getItem('calib_points') || '[]');
+let fit = null; // {m, b}
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    video.srcObject = stream;
+    captureBtn.disabled = false;
+    startBtn.textContent = 'Câmera ligada';
+    startBtn.disabled = true;
+  } catch (err) {
+    alert('Não foi possível acessar a câmera: ' + err.message);
+  }
+}
+startBtn.addEventListener('click', startCamera);
+
+// Drag do ROI
+let dragging = false, offsetX = 0, offsetY = 0;
+roiBox.addEventListener('pointerdown', (e) => {
+  dragging = true;
+  const rect = roiBox.getBoundingClientRect();
+  offsetX = e.clientX - rect.left;
+  offsetY = e.clientY - rect.top;
+  roiBox.setPointerCapture(e.pointerId);
+});
+roiBox.addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  const wrap = roiBox.parentElement.getBoundingClientRect();
+  let x = e.clientX - wrap.left - offsetX;
+  let y = e.clientY - wrap.top - offsetY;
+  x = Math.max(0, Math.min(x, wrap.width - roiBox.offsetWidth));
+  y = Math.max(0, Math.min(y, wrap.height - roiBox.offsetHeight));
+  roiBox.style.left = (x / wrap.width * 100) + '%';
+  roiBox.style.top = (y / wrap.height * 100) + '%';
+});
+roiBox.addEventListener('pointerup', () => dragging = false);
+
+function captureFrame() {
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0);
+
+  const wrapRect = roiBox.parentElement.getBoundingClientRect();
+  const roiRect = roiBox.getBoundingClientRect();
+  const scaleX = canvas.width / wrapRect.width;
+  const scaleY = canvas.height / wrapRect.height;
+
+  const sx = (roiRect.left - wrapRect.left) * scaleX;
+  const sy = (roiRect.top - wrapRect.top) * scaleY;
+  const sw = roiRect.width * scaleX;
+  const sh = roiRect.height * scaleY;
+
+  const imgData = ctx.getImageData(sx, sy, sw, sh);
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let i = 0; i < imgData.data.length; i += 4) {
+    r += imgData.data[i];
+    g += imgData.data[i+1];
+    b += imgData.data[i+2];
+    n++;
+  }
+  r = Math.round(r / n);
+  g = Math.round(g / n);
+  b = Math.round(b / n);
+
+  // Canal usado para a curva: aqui usamos absorbância aproximada no canal G
+  // (ajuste para R ou B conforme a cor da sua reação/amostra)
+  const channel = -Math.log10(Math.max(g, 1) / 255);
+
+  currentReading = { r, g, b, channel };
+  swatch.style.background = `rgb(${r},${g},${b})`;
+  rgbText.textContent = `RGB: ${r}, ${g}, ${b}`;
+  labText.textContent = `Absorbância (canal G): ${channel.toFixed(4)}`;
+  updateResult();
+}
+captureBtn.addEventListener('click', captureFrame);
+
+function renderPoints() {
+  pointsTableBody.innerHTML = '';
+  points.forEach((p, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${p.conc}</td><td>${p.channel.toFixed(4)}</td><td><a class="del" data-i="${i}">remover</a></td>`;
+    pointsTableBody.appendChild(tr);
+  });
+  document.querySelectorAll('.del').forEach(el => {
+    el.addEventListener('click', () => {
+      points.splice(+el.dataset.i, 1);
+      savePoints();
+      renderPoints();
+      computeFit();
+    });
+  });
+}
+
+function savePoints() {
+  localStorage.setItem('calib_points', JSON.stringify(points));
+}
+
+addPointBtn.addEventListener('click', () => {
+  if (!currentReading) { alert('Capture uma leitura primeiro.'); return; }
+  const conc = parseFloat(concInput.value);
+  if (isNaN(conc)) { alert('Informe a concentração do padrão.'); return; }
+  points.push({ conc, channel: currentReading.channel });
+  savePoints();
+  renderPoints();
+  computeFit();
+  concInput.value = '';
+});
+
+function computeFit() {
+  if (points.length < 2) {
+    fit = null;
+    fitInfo.textContent = 'Adicione ao menos 2 pontos para gerar a curva.';
+    updateResult();
+    return;
+  }
+  // Regressão linear simples: channel = m*conc + b
+  const n = points.length;
+  const sumX = points.reduce((s,p) => s + p.conc, 0);
+  const sumY = points.reduce((s,p) => s + p.channel, 0);
+  const sumXY = points.reduce((s,p) => s + p.conc*p.channel, 0);
+  const sumXX = points.reduce((s,p) => s + p.conc*p.conc, 0);
+  const denom = (n*sumXX - sumX*sumX);
+  if (denom === 0) {
+    fit = null;
+    fitInfo.textContent = 'Pontos insuficientes (concentrações repetidas).';
+    updateResult();
+    return;
+  }
+  const m = (n*sumXY - sumX*sumY) / denom;
+  const b = (sumY - m*sumX) / n;
+  fit = { m, b };
+  fitInfo.textContent = `Curva: canal = ${m.toFixed(5)} × conc + ${b.toFixed(5)}`;
+  updateResult();
+}
+
+function updateResult() {
+  if (!currentReading) { resultText.textContent = '—'; return; }
+  if (!fit) { resultText.textContent = 'Sem calibração'; return; }
+  const conc = (currentReading.channel - fit.b) / fit.m;
+  resultText.textContent = conc.toFixed(3);
+}
+
+renderPoints();
+computeFit();
+</script>
+
+</body>
+</html>
