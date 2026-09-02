@@ -63,10 +63,6 @@
 <p class="sub">Leitura de cor pela câmera e curva de calibração</p>
 
 <div class="card">
-  <div class="row">
-    <label class="small" for="apiUrlInput">Endereço da API</label>
-  </div>
-  <input type="text" id="apiUrlInput" style="width:100%" placeholder="https://seu-backend.exemplo.com">
   <div id="statusText" class="small">desconectado</div>
 </div>
 
@@ -125,21 +121,16 @@ const addPointBtn = document.getElementById('addPointBtn');
 const pointsTableBody = document.querySelector('#pointsTable tbody');
 const fitInfo = document.getElementById('fitInfo');
 const resultText = document.getElementById('resultText');
-const apiUrlInput = document.getElementById('apiUrlInput');
 const statusText = document.getElementById('statusText');
+
+const API_BASE_URL = 'https://olicolorimetro-api.onrender.com';
 
 let lastBlob = null;
 let lastRoi = null;
 
 function apiBase() {
-  return apiUrlInput.value.trim().replace(/\/$/, '');
+  return API_BASE_URL;
 }
-
-apiUrlInput.value = localStorage.getItem('api_base_url') || '';
-apiUrlInput.addEventListener('change', () => {
-  localStorage.setItem('api_base_url', apiUrlInput.value.trim());
-  refreshCalibration();
-});
 
 function setStatus(text, kind) {
   statusText.textContent = text;
@@ -209,10 +200,6 @@ function captureFrame() {
 captureBtn.addEventListener('click', captureFrame);
 
 async function sendReading(blob, roi) {
-  if (!apiBase()) {
-    setStatus('informe o endereço da API acima', 'error');
-    return;
-  }
   const form = new FormData();
   form.append('image', blob, 'frame.jpg');
   form.append('roi_x', roi.x);
@@ -241,7 +228,6 @@ async function addCalibrationPoint() {
   if (!lastBlob || !lastRoi) { alert('Capture uma leitura primeiro.'); return; }
   const conc = parseFloat(concInput.value);
   if (isNaN(conc)) { alert('Informe a concentração do padrão.'); return; }
-  if (!apiBase()) { setStatus('informe o endereço da API acima', 'error'); return; }
 
   const form = new FormData();
   form.append('image', lastBlob, 'frame.jpg');
@@ -265,7 +251,6 @@ async function addCalibrationPoint() {
 addPointBtn.addEventListener('click', addCalibrationPoint);
 
 async function refreshCalibration() {
-  if (!apiBase()) return;
   try {
     const [pointsRes, fitRes] = await Promise.all([
       fetch(`${apiBase()}/api/calibration-points`),
@@ -275,8 +260,9 @@ async function refreshCalibration() {
     const fit = await fitRes.json();
     renderPoints(points);
     renderFit(fit);
+    setStatus('conectado', 'ok');
   } catch (err) {
-    setStatus('falha ao carregar calibração: ' + err.message, 'error');
+    setStatus('falha ao conectar na API: ' + err.message, 'error');
   }
 }
 
